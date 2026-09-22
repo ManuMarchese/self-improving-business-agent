@@ -1,0 +1,23 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "permission": {
+    "bash": {
+      "*": "allow",
+      "git push": "ask",
+      "git push *": "ask",
+      "Remove-Item": "ask",
+      "Remove-Item *": "ask",
+      "del": "ask",
+      "del *": "ask",
+      "rm": "ask",
+      "rm *": "ask",
+      "*tokens.priv*": "ask",
+      "*cookies.priv*": "ask"
+    },
+    "read": {
+      "*": "allow",
+      "*tokens.priv*": "ask",
+      "*cookies.priv*": "ask"
+    }
+  }
+}
