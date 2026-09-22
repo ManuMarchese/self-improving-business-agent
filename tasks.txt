@@ -1,0 +1,5 @@
+# Tareas — se gestionan con: python agent.py status | next | add | done
+
+[ ] Definir negocio, cliente ideal y oferta en RUNSTATE.md + strategy.md
+[ ] Primera corrida con meter (run new + budget + close)
+[ ] Reemplazar las filas DEMO del golden por casos reales del negocio

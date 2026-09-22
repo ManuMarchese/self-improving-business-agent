@@ -1,0 +1,14 @@
+node_modules/
+__pycache__/
+*.pyc
+.env*
+!.env.mobile.example
+.DS_Store
+opencode.db
+cookies*.txt
+*.priv/
+*.pem
+*.key
+skeleton/build/
+logs/
+trace.jsonl
