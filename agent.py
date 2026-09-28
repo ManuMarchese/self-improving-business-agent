@@ -1764,7 +1764,7 @@ def cmd_doctor():
 
 _SKEL_README = """# Self-Improving Business Agent (beta publica beta-1.2)
 
-> Un agente que intenta mejorarse solo **y que no se miente**: cada propuesta de mejora
+> Agente que aprende de vos y no te chamuya: cada propuesta de mejora
 > pasa por un juez estadistico y un examen que el sistema nunca ve. Sin dependencias
 > (stdlib), alumno 100% local via Ollama. Beta, sin SLA.
 
