@@ -12,3 +12,6 @@ cookies*.txt
 skeleton/build/
 logs/
 trace.jsonl
+.cache/
+tasks/py_funcs/_fuente/
+motor/_llm_cwd/

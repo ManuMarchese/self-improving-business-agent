@@ -1,7 +1,33 @@
-# Self-Improving Business Agent (beta publica beta-1.1)
+# Self-Improving Business Agent (beta publica beta-1.2)
 
-> Beta beta-1.1: la ingenieria esta probada en produccion privada; los numeros y
-> filas de ejemplo son sinteticos (demo, NO verdad humana), sin SLA.
+> Un agente que intenta mejorarse solo **y que no se miente**: cada propuesta de mejora
+> pasa por un juez estadistico y un examen que el sistema nunca ve. Sin dependencias
+> (stdlib), alumno 100% local via Ollama. Beta, sin SLA.
+
+## El motor que aprende (lo nuevo en beta-1.2)
+
+```
+python -m motor eval    --task T --policy ID --split dev       # nota con IC 95% + integridad
+python -m motor compare --a results_A.jsonl --b results_B.jsonl # juez pareado: ACEPTA / RECHAZA
+python -m motor learn   --task T --parent v0 --rondas 3 --nonce R1   # ciclo ACE
+python -m motor skills  --task T --parent v0 --desde runs_motor/<...-train>/results.jsonl
+```
+
+Probalo sin red: `set MOTOR_LLM=mock` y `set MOTOR_MOCK_FILE=tasks/eco_mock/mock.json`, despues
+`python -m motor seal --task eco_mock` y `python -m motor eval --task eco_mock --policy v0 --split dev`.
+Con modelo local: `ollama pull qwen2.5:1.5b` (ver `motor/models.json`).
+
+Defensas contra la trampa, cada una con test: examen sellado por hash (exit 3), registro
+encadenado que detecta insercion/edicion/truncado, corrector que exige tipos nativos (anti
+objetos con `__eq__` trucho), guardia que anula la corrida si el modelo toca el repo (exit 5),
+caidas del proveedor fuera del puntaje (exit 4).
+
+**Resultados reales (honestos):** con un alumno de 1.5B, 4 de 4 propuestas de mejora fueron
+rechazadas por el juez (reglas ACE y biblioteca de habilidades), y la decision tomada en dev
+coincidio con el examen externo. El sistema mide sin enganarse; todavia no demostro aprender.
+Detalle: docs/METODOLOGIA.md, docs/RESULTADOS.md y CHANGELOG.md.
+
+> Los numeros y filas del golden de negocio son sinteticos (demo, NO verdad humana).
 > ToS Instagram/Meta: usa solo API oficial Meta; el scraping riesgoso (bloqueos,
 > 429, baja de cuenta) esta prohibido en este proyecto; respetar cuotas
 > (Discovery 200/h, hashtag 30/7d con tope operativo 25/30).

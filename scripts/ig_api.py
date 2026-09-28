@@ -3,6 +3,16 @@
 
 Solo stdlib (urllib). Solo lectura. Jamas imprime el token.
 
+Saves/shares (oficial, ToS-safe): Business Discovery NO los expone para
+perfiles de terceros (solo likes/comments/views). Los campos oficiales
+`saved_count` / `shares_count` (IG Media, Facebook Login) son owner-only
+(propio o colaborador aceptado); tampoco salen por Business Discovery ni
+hashtag. Por eso `summarize` los incluye cuando el payload los trae
+(misma tecnica que likes/comments: .get con adaptacion de nombre) y
+`get_own_media_counts` / `list_own_media_with_counts` los leen por la via
+oficial de media propio. Si el token no tiene ese permiso, la API devuelve
+error de permisos y NO se reintenta.
+
 Uso:
   python scripts/ig_api.py --token-file <ruta-fuera-del-repo> <usuario> [<usuario2> ...]
   python scripts/ig_api.py --token-file <ruta> --posts 6 <usuario>
@@ -63,6 +73,88 @@ def api_get(token, path, params):
         return None, {"http": 0, "code": None, "message": f"error de red: {type(ex).__name__}"}
 
 
+def _first(*vals):
+    for v in vals:
+        if v is not None:
+            return v
+    return None
+
+
+def _insights_val(media, *names):
+    """Adapta payload de /insights ({"data": [{"name":..,"values":[{"value":N}]}]})."""
+    ins = media.get("insights") or media.get("media_insights")
+    if not isinstance(ins, dict):
+        return None
+    data = ins.get("data") or []
+    if not isinstance(data, list):
+        return None
+    for entry in data:
+        if isinstance(entry, dict) and entry.get("name") in names:
+            vals = entry.get("values") or []
+            if vals and isinstance(vals[0], dict) and "value" in vals[0]:
+                return vals[0]["value"]
+    return None
+
+
+def media_saves(media):
+    """Saves oficiales si el payload los trae; None si el endpoint no los da.
+
+    Acepta `saves` (mock/discovery futuro), `saved_count` (IG Media
+    owner-only, Facebook Login) y `saved` + bloque insights anidado.
+    """
+    return _first(
+        media.get("saves"),
+        media.get("saved_count"),
+        media.get("saved"),
+        _insights_val(media, "saved", "saves", "saved_count"),
+    )
+
+
+def media_shares(media):
+    """Shares oficiales si el payload los trae; None si el endpoint no los da.
+
+    Acepta `shares`, `shares_count` (owner-only) y `share_count` + insights.
+    """
+    return _first(
+        media.get("shares"),
+        media.get("shares_count"),
+        media.get("share_count"),
+        _insights_val(media, "shares", "share_count", "shares_count"),
+    )
+
+
+def get_own_media_counts(token, media_id):
+    """Lee saved_count/shares_count oficiales de UN media propio (owner-only).
+
+    Via oficial ToS-safe: GET /{ig-media-id}?fields=saved_count,shares_count
+    (Facebook Login; 1 llamada). Requiere permiso de insights/contenido propio;
+    sin ese scope la API devuelve error de permisos (NO reintentar).
+    Jamas imprime el token. Devuelve (dict|None, err|None).
+    """
+    data, err = api_get(token, f"/{media_id}", {"fields": "saved_count,shares_count"})
+    if err:
+        return None, err
+    d = data or {}
+    return {"id": d.get("id"), "saved_count": d.get("saved_count"),
+            "shares_count": d.get("shares_count")}, None
+
+
+def list_own_media_with_counts(token, ig_user_id, limit=1):
+    """Lista media propio con saves/shares en UNA sola llamada oficial.
+
+    GET /{ig-user-id}/media?fields=id,caption,saved_count,shares_count&limit=N.
+    Owner-only (mismo permiso que get_own_media_counts). Para verificacion de
+    scope con 1 llamada y pacing (el caller duerme entre perfiles).
+    Devuelve (lista|None, err|None). Jamas imprime el token.
+    """
+    n = max(1, min(int(limit), 25))
+    data, err = api_get(token, f"/{ig_user_id}/media",
+                        {"fields": "id,caption,saved_count,shares_count", "limit": n})
+    if err:
+        return None, err
+    return ((data or {}).get("data")) or [], None
+
+
 def discover_profile(token, ig_user_id, username, n_posts):
     n = max(1, min(int(n_posts), 25))
     fields = (
@@ -99,6 +191,8 @@ def summarize(user, n_posts):
                 "likes": m.get("like_count"),
                 "vistas": m.get("view_count"),
                 "comentarios": m.get("comments_count"),
+                "saves": media_saves(m),
+                "shares": media_shares(m),
                 "caption": cap[:140],
             }
         )

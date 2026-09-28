@@ -20,7 +20,8 @@ empeoramiento → KEEP bloqueado.
 
 - Decision exacta obligatoria (`califica|no_califica|descarte`); score con tolerancia de la rubrica.
 - Filas inmutables: corregir = agregar fila con `supersedes`; el core resuelve la ultima.
-- Peso 3 = verdad humana documentada. Regresion en peso 3 = **VETO DURO**: KEEP bloqueado.
+- Peso 3 = verdad humana documentada. Regresion en peso 3 = **VETO DURO**: KEEP bloqueado
+  (`golden diff` sale 2; la CI y los scripts frenan el cambio).
 - Scoreboard con ambos: Raw X/Y y Weighted Z%.
 - `input.gate` congelado preserva el juicio del momento (no se re-derivan filtros viejos).
 

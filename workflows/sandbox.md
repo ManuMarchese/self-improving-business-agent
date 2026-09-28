@@ -1,3 +1,7 @@
+---
+name: sandbox
+description: Sobre para corridas largas autonomas con limites duros y trazabilidad; usar cuando el dueno deja corriendo horas. Keywords: sandbox, limites, budget, trazabilidad, autonomo.
+---
 # WORKFLOW sandbox (v1) — sobre para corridas largas autónomas
 
 Usar cuando: el dueño deja corriendo horas (research, oleadas, builds). Envuelve

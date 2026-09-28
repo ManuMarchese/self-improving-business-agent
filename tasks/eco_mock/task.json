@@ -1,0 +1,5 @@
+{
+ "nombre": "eco_mock",
+ "descripcion": "Tarea de juguete: devolver el texto de entrada exactamente en mayusculas (para probar eval con MOTOR_LLM=mock).",
+ "formato_salida": "texto en mayusculas, una sola linea, sin agregar ni quitar caracteres"
+}

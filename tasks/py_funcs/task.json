@@ -1,0 +1,5 @@
+{
+ "nombre": "py_funcs",
+ "descripcion": "Escribir una funcion Python que resuelva un enunciado corto (MBPP sanitized) y pase sus asserts. Nota objetiva: fraccion de asserts que pasan en el sandbox.",
+ "formato_salida": "exactamente un bloque ```python``` con la funcion; sin texto fuera del bloque obligatorio"
+}

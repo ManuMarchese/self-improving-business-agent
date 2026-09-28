@@ -1,0 +1,2 @@
+{"id": "ECO-D1", "input": {"texto": "golden set con veto"}, "expected": "GOLDEN SET CON VETO"}
+{"id": "ECO-D2", "input": {"texto": "cadena de auditoria"}, "expected": "CADENA DE AUDITORIA"}

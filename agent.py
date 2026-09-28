@@ -41,7 +41,8 @@ regresion en caso con verdad humana (peso 3) = VETO (KEEP bloqueado).
   python agent.py golden rescore --task <task> --rubric <f> --out <hoja>
                                                                  chequeos codigo ($0) + hoja ciega (sin expected)
   python agent.py golden diff <hoja-puntuada> --task <task> --rubric <f> [--scorer <s>]
-                                                                 compara, Raw + Weighted + veto, apenda results
+                                                                  compara, Raw + Weighted + veto, apenda results
+                                                                  exit 0 = OK | 1 = error de uso | 2 = VETO DURO (peso 3)
   python agent.py golden sample --task <t> --run <slug> --input '<json>' --output '<json>' --reason <m>
                                                                  produccion -> live_queue (revisa un humano)
   python agent.py golden promote <sample_id> --id <ID> --score <n> --decision <d>
@@ -56,8 +57,16 @@ Auditoria y esqueleto (F0 blindaje):
                                       Exit 0 = OK, 1 = bloquea push.
   python agent.py skeleton [--out DIR] genera el esqueleto publico (allowlist, sin
                                       negocio) en skeleton/ (default). Determinista.
-  python agent.py verify [--scope runs|golden|memory|all]
-                                      verifica cadenas de auditoria (prev/hash) en logs.
+  python agent.py verify [--scope runs|golden|memory|evals|all]
+                                       verifica cadenas de auditoria (prev/hash) +
+                                       ancla externa chain_heads.json. Legacy sin
+                                       sello SOLO vale como prefijo; truncar,
+                                       reescribir o editar = FAIL. Incluye
+                                       evals/ledger.jsonl (resumenes de eval del motor).
+  python agent.py chain init [--force]
+                                       genera chain_heads.json (ancla de la cadena).
+                                       Requiere que la cadena actual este sana.
+                                       Sin --force se niega si ya existe un ancla.
   python agent.py ask "texto"           clasifica el pedido (pipeline|run-state|memory|direct),
                                       lo ejecuta si es memoria/estado y lo registra en
                                       memory_queries.jsonl (veredicto: pending).
@@ -84,7 +93,7 @@ import sys
 import tempfile
 import time
 from datetime import date, datetime, timezone
-from pathlib import Path
+from pathlib import Path, PurePath
 
 ROOT = Path(__file__).resolve().parent
 TASKS = ROOT / "tasks.txt"
@@ -202,10 +211,7 @@ def cmd_memadd(tag, text):
         "tag": (tag.strip() or "general"),
         "fact": text.strip(),
     }
-    _chain_seal(MEMLOG, entry)
-    line = json.dumps(entry, ensure_ascii=False)
-    with MEMLOG.open("a", encoding="utf-8") as f:
-        f.write(line + "\n")
+    _chain_append(MEMLOG, entry)
     print(f"Loggato [{entry['tag']}]: {entry['fact'][:80]}")
 
 
@@ -324,30 +330,134 @@ def _chain_canon(obj):
     return json.dumps(obj, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
 
 
-def _chain_prev(path):
-    """Hash de la ultima linea encadenada del archivo, o None. Solo lectura."""
-    try:
-        lines = [l for l in Path(path).read_text(encoding="utf-8").splitlines() if l.strip()]
-    except OSError:
-        return None
-    for raw in reversed(lines):
+def _legacy_block_sha(legacy_lines):
+    """sha256 del bloque legacy (prefijo sin sello) tal cual aparece en el archivo."""
+    if not legacy_lines:
+        return ""
+    return hashlib.sha256(("\n".join(legacy_lines) + "\n").encode("utf-8")).hexdigest()
+
+
+def _chain_state(path):
+    """Estado de un archivo encadenado. Devuelve (state, error):
+
+      state = {"legacy_n", "legacy_sha256", "n", "head"} o None si no existe.
+      error = mensaje cuando la cadena esta corrupta.
+
+    Reglas (verify y chain init usan esta misma funcion, no hay logica duplicada):
+      - las lineas sin sello SOLO valen como PREFIJO (legacy); una linea sin
+        sello despues de la primera sellada = corrupcion.
+      - prev debe encadenar desde GENESIS y el hash debe cuadrar con el canon.
+    """
+    p = Path(path)
+    if not p.exists():
+        return None, None
+    legacy_lines, n, head = [], 0, None
+    for i, raw in enumerate(p.read_text(encoding="utf-8").splitlines(), start=1):
+        if not raw.strip():
+            continue
         try:
             o = json.loads(raw)
         except ValueError:
+            return None, f"linea {i}: no es JSON"
+        if not isinstance(o, dict) or not isinstance(o.get("hash"), str):
+            if n > 0:
+                return None, f"linea {i}: sin sello despues del genesis"
+            legacy_lines.append(raw)
             continue
-        if isinstance(o, dict) and isinstance(o.get("hash"), str):
-            return o["hash"]
-    return None
+        if o.get("prev") != (head or "GENESIS"):
+            return None, f"linea {i}: prev roto (reordenada/insertada)"
+        if hashlib.sha256(_chain_canon({k: v for k, v in o.items() if k != "hash"})).hexdigest() != o["hash"]:
+            return None, f"linea {i}: hash no coincide (editada)"
+        head = o["hash"]
+        n += 1
+    return (
+        {"legacy_n": len(legacy_lines), "legacy_sha256": _legacy_block_sha(legacy_lines), "n": n, "head": head},
+        None,
+    )
+
+
+def _heads_path():
+    """chain_heads.json: ancla externa de toda la cadena (raiz del repo)."""
+    return ROOT / "chain_heads.json"
+
+
+def _load_heads():
+    """Lee el ancla. Si falta o esta rota, dict vacio (verify avisa con WARN)."""
+    p = _heads_path()
+    if not p.exists():
+        return {}
+    try:
+        heads = json.loads(p.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    return heads if isinstance(heads, dict) else {}
+
+
+def _save_heads(heads):
+    """Escritura atomica del ancla (tmp + fsync + rename)."""
+    _atomic_write(
+        _heads_path(), json.dumps(heads, ensure_ascii=False, indent=1, sort_keys=True) + "\n"
+    )
+
+
+def _chain_key(path):
+    """Ruta relativa al repo (clave del ancla), o None si el archivo esta fuera."""
+    try:
+        rel = os.path.relpath(os.path.realpath(str(path)), os.path.realpath(str(ROOT)))
+    except (OSError, ValueError):
+        return None
+    if rel == "." or rel.startswith(".."):
+        return None
+    return PurePath(rel).as_posix()
+
+
+def _chain_prev(path):
+    """Hash de la ultima linea sellada del archivo, o None. Solo lectura."""
+    state, _ = _chain_state(path)
+    return state["head"] if state else None
 
 
 def _chain_seal(path, entry):
-    """Agrega prev+hash a entry (cadena de auditoria; lineas legacy sin hash se ignoran)."""
+    """Agrega prev+hash a entry (cadena de auditoria; legacy solo vale como prefijo)."""
     prev = _chain_prev(path) or "GENESIS"
     entry["prev"] = prev
     entry["hash"] = hashlib.sha256(
         _chain_canon({k: v for k, v in entry.items() if k != "hash"})
     ).hexdigest()
     return entry
+
+
+def _chain_append(path, entry):
+    """Unica forma de escribir una linea sellada: valida, sella, appenda y ancla.
+
+    Pasos (todos o ninguno): state del archivo -> sello prev/hash -> append ->
+    chain_heads.json. Si la cadena ya esta corrupta, NO escribe y aborta
+    (un append sobre historia rota no la puede arreglar).
+    """
+    p = Path(path)
+    state, err = _chain_state(p)
+    if err:
+        raise SystemExit(
+            f"cadena corrupta en {p}: {err}. Corregir antes de escribir "
+            f"(python agent.py verify). Append cancelado, historia intacta."
+        )
+    entry["prev"] = (state["head"] or "GENESIS") if state else "GENESIS"
+    entry["hash"] = hashlib.sha256(
+        _chain_canon({k: v for k, v in entry.items() if k != "hash"})
+    ).hexdigest()
+    with p.open("a", encoding="utf-8") as f:
+        f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+    key = _chain_key(p)
+    if not key:
+        return  # archivo fuera del repo: se sella la linea, pero no hay ancla
+    heads = _load_heads()
+    heads[key] = {
+        "head": entry["hash"],
+        "n": (state["n"] if state else 0) + 1,
+        "legacy_n": state["legacy_n"] if state else 0,
+        "legacy_sha256": state["legacy_sha256"] if state else "",
+    }
+    _save_heads(heads)
 
 
 def _trace(event, payload):
@@ -431,9 +541,7 @@ def _lock_release(name):
 
 def _journal_append(rdir, event, msg):
     entry = {"ts": datetime.now().isoformat(timespec="seconds"), "event": event, "msg": msg}
-    _chain_seal(rdir / "journal.jsonl", entry)
-    with (rdir / "journal.jsonl").open("a", encoding="utf-8") as f:
-        f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+    _chain_append(rdir / "journal.jsonl", entry)
     _trace("run", {"run": rdir.name, "run_event": event})
 
 
@@ -950,6 +1058,8 @@ def main(argv):
     elif cmd == "verify":
         vflags, _ = _parse_args(rest)
         return cmd_verify(vflags.get("scope", "") or "all")
+    elif cmd == "chain":
+        return _cmd_chain(rest)
     elif cmd == "skeleton":
         sflags, _ = _parse_args(rest)
         return cmd_skeleton(sflags.get("out", "") or "skeleton")
@@ -957,6 +1067,17 @@ def main(argv):
         print(f"Comando desconocido: {cmd}\n{__doc__}")
         return 1
     return 0
+
+
+def _cmd_chain(args):
+    if not args or args[0] not in ("init",):
+        print("Uso: python agent.py chain init [--force]")
+        return 1
+    sub, rest = args[0], args[1:]
+    if sub == "init":
+        flags, _ = _parse_args(rest)
+        return cmd_chain_init(force=bool(flags.get("force")))
+    return 1
 
 
 def _parse_args(args):
@@ -1200,6 +1321,13 @@ def cmd_golden_rescore(task, rubric_path, out_path):
 
 
 def cmd_golden_diff(scored_path, task, rubric_path, scorer="", dry_run=False):
+    """Compara una hoja puntuada contra el golden congelado y sella el scoreboard.
+
+    Codigos de salida (para que scripts y CI puedan frenarse solos):
+      0 = sin veto (pasa todo, o los fallos no tocan ninguna fila de peso 3)
+      1 = error de uso (falta hoja/task/rubric, task sin checks, golden vacio)
+      2 = VETO DURO: hubo regresion en una fila de peso 3 (KEEP bloqueado)
+    """
     if not scored_path or not task or not rubric_path:
         print("Uso: python agent.py golden diff <hoja> --task <t> --rubric <f> [--scorer <s>]")
         return 1
@@ -1264,7 +1392,10 @@ def cmd_golden_diff(scored_path, task, rubric_path, scorer="", dry_run=False):
         "veto": veto,
         "scorer": scorer,
     }
-    _chain_seal(GOLDEN_DIR / "results.jsonl", res)
+    if dry_run:
+        print("DRY-RUN: no se escribe results.jsonl.")
+    else:
+        _chain_append(GOLDEN_DIR / "results.jsonl", res)
     _trace(
         "golden_diff",
         {
@@ -1277,16 +1408,12 @@ def cmd_golden_diff(scored_path, task, rubric_path, scorer="", dry_run=False):
             "dry_run": dry_run,
         },
     )
-    if dry_run:
-        print("DRY-RUN: no se escribe results.jsonl.")
-    else:
-        with open(GOLDEN_DIR / "results.jsonl", "a", encoding="utf-8") as fh:
-            fh.write(json.dumps(res, ensure_ascii=False) + "\n")
     print(f"Raw: {npass}/{ntot} | Weighted: {pct:.1f}% | fails: {fails or '-'}")
     if veto:
         print("VETO DURO: regresion en caso con verdad humana (peso 3) -> KEEP BLOQUEADO.")
-    else:
-        print("Sin veto.")
+        print("Exit 2: CI y scripts deben frenarse aqui (no promover este cambio).")
+        return 2
+    print("Sin veto.")
     return 0
 
 
@@ -1411,6 +1538,8 @@ _SECRET_RES = [
     (re.compile(r"-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----"), "clave privada"),
     (re.compile(r"EAA[A-Za-z0-9_-]{20,}"), "posible token Meta"),
     (re.compile(r"[A-Za-z]:\\Users\\[^\s\"']+"), "ruta absoluta Windows"),
+    (re.compile(r"[A-Za-z]:/Users/[^\s\"']+"), "ruta absoluta Windows"),
+    (re.compile(r"[A-Za-z]:\\\\Users\\\\[^\s\"']+"), "ruta absoluta Windows"),
     (re.compile("/ho" + "me/[^\\s\"':]+"), "ruta absoluta unix"),
 ]
 # Valores de credencial/sesion mas cortos que esto son texto informativo, no secretos.
@@ -1485,8 +1614,34 @@ def _is_placeholder(value):
     return any(rx.search(v) for rx in _PLACEHOLDER_RES)
 
 
+def _load_doctor_allow():
+    """Excepciones puntuales del escaner: (file, line, sha256_de_la_linea).
+
+    Un hit se ignora SOLO si file + numero de linea + sha256 del contenido
+    exacto de esa linea coinciden con una entrada de doctor_allow.json.
+    Linea editada, linea movida o ruta nueva = sigue fallando. Archivo
+    ausente o JSON roto = sin excepciones (doctor no se afloja en silencio).
+    """
+    p = ROOT / "doctor_allow.json"
+    if not p.exists():
+        return set()
+    try:
+        data = json.loads(p.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return set()
+    allowed = set()
+    for e in data if isinstance(data, list) else []:
+        if not isinstance(e, dict):
+            continue
+        f, ln, sha = e.get("file"), e.get("line"), e.get("sha256")
+        if isinstance(f, str) and isinstance(ln, int) and isinstance(sha, str):
+            allowed.add((f.replace("\\", "/"), ln, sha))
+    return allowed
+
+
 def _scan_secrets(files):
     hits = []
+    allow = _load_doctor_allow()
     for p in files:
         rel = p.relative_to(ROOT).as_posix()
         if any(rx.search(rel) for rx in _SKIP_SCAN_RES):
@@ -1507,6 +1662,9 @@ def _scan_secrets(files):
                     continue
                 if _is_placeholder(val):
                     continue
+                sha = hashlib.sha256(line.encode("utf-8")).hexdigest()
+                if (rel, i, sha) in allow:
+                    break
                 hits.append(f"{rel}:{i}: {label}")
                 break
     return hits
@@ -1581,6 +1739,11 @@ def cmd_doctor():
                     warns.append(f"  diff: {d}")
             print(f"doctor: skeleton ........ {'FAIL' if diff else 'OK'}")
 
+    rc = cmd_verify("all")
+    if rc != 0:
+        fails.append(f"verify fallo (rc={rc})")
+    print(f"doctor: cadena .......... {'FAIL' if rc else 'OK'} (verify + chain_heads)")
+
     after = _sha256_file(gj) if gj.exists() else None
     if before != after:
         fails.append("doctor ESCRIBIO golden.jsonl (violacion read-only)")
@@ -1599,10 +1762,36 @@ def cmd_doctor():
 
 # --- Skeleton: plantillas genericas embebidas (sin negocio) -----------------
 
-_SKEL_README = """# Self-Improving Business Agent (beta publica beta-1.1)
+_SKEL_README = """# Self-Improving Business Agent (beta publica beta-1.2)
 
-> Beta beta-1.1: la ingenieria esta probada en produccion privada; los numeros y
-> filas de ejemplo son sinteticos (demo, NO verdad humana), sin SLA.
+> Un agente que intenta mejorarse solo **y que no se miente**: cada propuesta de mejora
+> pasa por un juez estadistico y un examen que el sistema nunca ve. Sin dependencias
+> (stdlib), alumno 100% local via Ollama. Beta, sin SLA.
+
+## El motor que aprende (lo nuevo en beta-1.2)
+
+```
+python -m motor eval    --task T --policy ID --split dev       # nota con IC 95% + integridad
+python -m motor compare --a results_A.jsonl --b results_B.jsonl # juez pareado: ACEPTA / RECHAZA
+python -m motor learn   --task T --parent v0 --rondas 3 --nonce R1   # ciclo ACE
+python -m motor skills  --task T --parent v0 --desde runs_motor/<...-train>/results.jsonl
+```
+
+Probalo sin red: `set MOTOR_LLM=mock` y `set MOTOR_MOCK_FILE=tasks/eco_mock/mock.json`, despues
+`python -m motor seal --task eco_mock` y `python -m motor eval --task eco_mock --policy v0 --split dev`.
+Con modelo local: `ollama pull qwen2.5:1.5b` (ver `motor/models.json`).
+
+Defensas contra la trampa, cada una con test: examen sellado por hash (exit 3), registro
+encadenado que detecta insercion/edicion/truncado, corrector que exige tipos nativos (anti
+objetos con `__eq__` trucho), guardia que anula la corrida si el modelo toca el repo (exit 5),
+caidas del proveedor fuera del puntaje (exit 4).
+
+**Resultados reales (honestos):** con un alumno de 1.5B, 4 de 4 propuestas de mejora fueron
+rechazadas por el juez (reglas ACE y biblioteca de habilidades), y la decision tomada en dev
+coincidio con el examen externo. El sistema mide sin enganarse; todavia no demostro aprender.
+Detalle: docs/METODOLOGIA.md, docs/RESULTADOS.md y CHANGELOG.md.
+
+> Los numeros y filas del golden de negocio son sinteticos (demo, NO verdad humana).
 > ToS Instagram/Meta: usa solo API oficial Meta; el scraping riesgoso (bloqueos,
 > 429, baja de cuenta) esta prohibido en este proyecto; respetar cuotas
 > (Discovery 200/h, hashtag 30/7d con tope operativo 25/30).
@@ -1817,7 +2006,8 @@ empeoramiento → KEEP bloqueado.
 
 - Decision exacta obligatoria (`califica|no_califica|descarte`); score con tolerancia de la rubrica.
 - Filas inmutables: corregir = agregar fila con `supersedes`; el core resuelve la ultima.
-- Peso 3 = verdad humana documentada. Regresion en peso 3 = **VETO DURO**: KEEP bloqueado.
+- Peso 3 = verdad humana documentada. Regresion en peso 3 = **VETO DURO**: KEEP bloqueado
+  (`golden diff` sale 2; la CI y los scripts frenan el cambio).
 - Scoreboard con ambos: Raw X/Y y Weighted Z%.
 - `input.gate` congelado preserva el juicio del momento (no se re-derivan filtros viejos).
 
@@ -2010,6 +2200,51 @@ _SKEL_COPIES = [
     "workflows/juzgar.md",
     "workflows/sandbox.md",
     "golden/schema.json",
+    # --- beta-1.2: motor que aprende (MOTOR V2) ---
+    "motor/__init__.py",
+    "motor/__main__.py",
+    "motor/llm.py",
+    "motor/evaluate.py",
+    "motor/compare.py",
+    "motor/learn.py",
+    "motor/sandbox_py.py",
+    "motor/skills.py",
+    "motor/models.json",
+    "motor/_descubrimiento/run_json.txt",
+    "tasks/eco_mock/task.json",
+    "tasks/eco_mock/grader.py",
+    "tasks/eco_mock/train.jsonl",
+    "tasks/eco_mock/dev.jsonl",
+    "tasks/eco_mock/mock.json",
+    "policies/eco_mock/v0/policy.json",
+    "policies/eco_mock/v0/prompt.md",
+    "policies/eco_mock/v0/playbook.jsonl",
+    "tasks/py_funcs/task.json",
+    "tasks/py_funcs/grader.py",
+    "tasks/py_funcs/build_splits.py",
+    "tasks/py_funcs/FUENTE.md",
+    "tasks/py_funcs/train.jsonl",
+    "tasks/py_funcs/dev.jsonl",
+    "policies/py_funcs/v0/policy.json",
+    "policies/py_funcs/v0/prompt.md",
+    "policies/py_funcs/v0/playbook.jsonl",
+    "tests/conftest.py",
+    "tests/test_llm.py",
+    "tests/test_evaluate.py",
+    "tests/test_compare.py",
+    "tests/test_learn.py",
+    "tests/test_skills.py",
+    "tests/test_antitruchos.py",
+    "tests/test_py_funcs.py",
+    "tests/test_fase2.py",
+    "tests/test_chain.py",
+    "tests/test_golden_veto.py",
+    "tests/test_scan_secrets.py",
+    "pytest.ini",
+    ".gitattributes",
+    "docs/METODOLOGIA.md",
+    "docs/RESULTADOS.md",
+    "CHANGELOG.md",
 ]
 
 _SKEL_TROUBLESHOOTING = """# TROUBLESHOOTING (beta)
@@ -2330,11 +2565,12 @@ def cmd_run_checkpoint(slug, msg, nxt):
     return 0
 
 
-def cmd_verify(scope="all"):
-    """Verifica cadenas de auditoria (prev/hash). Legacy sin hash = prefijo confiable, no falla."""
-    if scope not in ("all", "runs", "golden", "memory"):
-        print("Uso: python agent.py verify [--scope runs|golden|memory|all]")
-        return 1
+def _verify_targets(scope):
+    """Archivos encadenados a verificar segun el scope (rutas absolutas + etiqueta).
+
+    evals/ledger.jsonl se resuelve desde ROOT en el momento de llamar (igual que
+    el ancla): un monkeypatch de ROOT en tests aisla la cadena sin tocar el repo.
+    """
     targets = []
     if scope in ("all", "runs") and RUNS.exists():
         targets += [(p, f"run:{p.parent.name}") for p in sorted(RUNS.glob("*/journal.jsonl"))]
@@ -2342,38 +2578,118 @@ def cmd_verify(scope="all"):
         targets.append((GOLDEN_DIR / "results.jsonl", "golden:results"))
     if scope in ("all", "memory"):
         targets.append((MEMLOG, "memory:log"))
-    fails = 0
+    if scope in ("all", "evals"):
+        targets.append((ROOT / "evals" / "ledger.jsonl", "evals:ledger"))
+    return targets
+
+
+def cmd_verify(scope="all"):
+    """Verifica cadenas de auditoria (prev/hash) + ancla externa (chain_heads.json).
+
+    Chequeos (en orden, el primero que truena frena el archivo):
+      1. legacy sin sello SOLO como prefijo (si no, "sin sello despues del genesis").
+      2. prev encadena desde GENESIS y hash cuadra (linea reordenada/insertada/editada).
+      3. head/n/legacy contra chain_heads.json (borrar el final o reescribir).
+      4. bloque legacy intacto (sha256 recalculado).
+      5. archivo con lineas selladas que NO figura en chain_heads.json.
+    Si chain_heads.json no existe (repo recien clonado / skeleton), es WARN, no FAIL:
+      avisa "sin ancla: correr chain init".
+    """
+    if scope not in ("all", "runs", "golden", "memory", "evals"):
+        print("Uso: python agent.py verify [--scope runs|golden|memory|evals|all]")
+        return 1
+    targets = _verify_targets(scope)
+    heads = _load_heads()
+    no_anchor = not _heads_path().exists()
+    fails, warns = 0, 0
     for path, label in targets:
         if not path.exists():
             print(f"  SKIP {label} (no existe)")
             continue
-        legacy, chained, prev, bad = 0, 0, None, None
-        for i, raw in enumerate(path.read_text(encoding="utf-8").splitlines(), start=1):
-            if not raw.strip():
-                continue
-            try:
-                o = json.loads(raw)
-            except ValueError:
-                bad = (i, "linea no-JSON")
-                break
-            if not isinstance(o, dict) or not isinstance(o.get("hash"), str):
-                legacy += 1
-                continue
-            if o.get("prev") != (prev or "GENESIS"):
-                bad = (i, "prev roto (linea reordenada/insertada?)")
-                break
-            if hashlib.sha256(_chain_canon({k: v for k, v in o.items() if k != "hash"})).hexdigest() != o["hash"]:
-                bad = (i, "hash no coincide (linea editada?)")
-                break
-            prev = o["hash"]
-            chained += 1
-        if bad:
+        st, err = _chain_state(path)
+        if err:
             fails += 1
-            print(f"  FAIL {label} linea {bad[0]}: {bad[1]}")
-        else:
-            print(f"  OK {label}: {chained} encadenadas, {legacy} legacy")
-    print("verify: FAIL" if fails else "verify: OK")
-    return 1 if fails else 0
+            print(f"  FAIL {label}: {err}")
+            continue
+        if no_anchor:
+            # sin ancla no hay contra que comparar: solo vale la cadena interna
+            print(f"  OK {label}: {st['n']} encadenadas, {st['legacy_n']} legacy (sin ancla)")
+            continue
+        key = _chain_key(path)
+        exp = heads.get(key) if key else None
+        if exp is not None:
+            if st["n"] != exp["n"] or st["head"] != exp["head"]:
+                fails += 1
+                print(
+                    f"  FAIL {label}: truncado o reescrito "
+                    f"(ancla n={exp['n']} head={str(exp['head'])[:12]}, "
+                    f"archivo n={st['n']} head={str(st['head'])[:12]})"
+                )
+                continue
+            if st["legacy_n"] != exp["legacy_n"] or st["legacy_sha256"] != exp["legacy_sha256"]:
+                fails += 1
+                print(f"  FAIL {label}: legacy editado ({exp['legacy_n']} lineas sin sello)")
+                continue
+        elif st["n"] > 0:
+            fails += 1
+            print(f"  FAIL {label}: {st['n']} lineas selladas pero no figura en chain_heads.json")
+            continue
+        print(f"  OK {label}: {st['n']} encadenadas, {st['legacy_n']} legacy")
+    if no_anchor:
+        warns += 1
+        print("  WARN sin ancla: correr 'python agent.py chain init' (chain_heads.json)")
+    if fails:
+        print("verify: FAIL")
+        return 1
+    print("verify: OK" + (" (con warn)" if warns else ""))
+    return 0
+
+
+def cmd_chain_init(force=False):
+    """Genera chain_heads.json con el estado actual de cada archivo encadenado.
+
+    Proteccion: solo corre si la verificacion de cadena (sin ancla) pasa. Si el
+    ancla ya existe, se niega salvo --force (y avisa que regenerar sobre una
+    historia ya manipulada NO detectaria la manipulacion).
+    """
+    hp = _heads_path()
+    if hp.exists() and not force:
+        print("chain_heads.json ya existe: reusandolo. Regenerar borraria la capacidad")
+        print("de detectar manipulacion hecha contra el ancla anterior. Si igual queres")
+        print("regenerarlo (ej: sabes que el repo esta sano), usa: python agent.py chain init --force")
+        return 1
+    heads, problems = {}, []
+    for path, label in _verify_targets("all"):
+        if not path.exists():
+            continue
+        st, err = _chain_state(path)
+        if err:
+            problems.append(f"{label}: {err}")
+            continue
+        key = _chain_key(path)
+        if not key:
+            continue
+        heads[key] = {
+            "head": st["head"],
+            "n": st["n"],
+            "legacy_n": st["legacy_n"],
+            "legacy_sha256": st["legacy_sha256"],
+        }
+    if problems:
+        print("chain init: la cadena esta corrupta, no se genera ancla. Corregir primero:")
+        for p in problems:
+            print(f"  - {p}")
+        return 1
+    if not heads:
+        print("chain init: no hay archivos encadenados para anclar.")
+        return 1
+    _save_heads(heads)
+    print(f"chain init: ancla generada con {len(heads)} archivo(s) en {hp.name}.")
+    for key in sorted(heads):
+        h = heads[key]
+        print(f"  {key}: {h['n']} selladas, {h['legacy_n']} legacy")
+    print("Proximo: python agent.py verify  (debe dar OK)")
+    return 0
 
 
 def cmd_golden_impact(task):

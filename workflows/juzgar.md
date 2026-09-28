@@ -1,3 +1,7 @@
+---
+name: juzgar
+description: Juez adversarial que intenta refutar una fase con evidencia propia; usar al terminar cada fase o loop de fix. Keywords: juzgar, juez, refutar, verificacion, adversarial.
+---
 # WORKFLOW juzgar (v1) — determinista, adversarial sin sesgos
 
 Usar cuando: termina una fase. El juez intenta REFUTAR lo construido, no confirmarlo.
@@ -12,6 +16,8 @@ salidas). Si algo no cierra, es REFUTADO.
 ## Ambiente calibrado
 - Ve: todo menos deny-list de investigar.
 - Puede ejecutar: unittest, doctor, report, status, queries puntuales.
+- En scores: verificar que cada uno cite PATs (runs/<slug>/scores/*.json con `pats` o
+  `sin_patron:true` explícito). Score sin cita = REFUTADO directo.
 
 ## Tools permitidas
 read, grep, glob, bash de verificación. Prohibidas: edit, write, git add/commit/push.

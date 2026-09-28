@@ -1,3 +1,7 @@
+---
+name: prospectar
+description: Evaluacion de cuentas IG como referentes o leads via ig_api con piso y nicho; usar para prospectar o shortlist, nunca congela goldens. Keywords: prospectar, leads, referentes, ig_api, shortlist.
+---
 # WORKFLOW prospectar (v1) — determinista, solo lectura de APIs
 
 Usar cuando: evaluar cuentas (IG) como referentes, leads o shortlist.

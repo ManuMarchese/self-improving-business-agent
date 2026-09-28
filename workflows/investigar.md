@@ -1,3 +1,7 @@
+---
+name: investigar
+description: Auditoria determinista solo-lectura del repo con evidencia; usar cuando hay que entender, auditar o buscar antecedentes, nunca para implementar. Keywords: investigar, auditoria, read-only, evidencia.
+---
 # WORKFLOW investigar (v1) — determinista, solo lectura
 
 Usar cuando: el pedido es entender, auditar, buscar antecedentes o vanguardia.

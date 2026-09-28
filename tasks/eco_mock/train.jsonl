@@ -1,0 +1,3 @@
+{"id": "ECO-T1", "input": {"texto": "hola mundo"}, "expected": "HOLA MUNDO"}
+{"id": "ECO-T2", "input": {"texto": "OpenCode es genial"}, "expected": "OPENCODE ES GENIAL"}
+{"id": "ECO-T3", "input": {"texto": "el agente aprende solo"}, "expected": "EL AGENTE APRENDE SOLO"}
